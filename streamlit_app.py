@@ -1,5 +1,5 @@
 """
-7주차 1번 수업: 사이드바 필터 및 집단 비교 영역 추가 대시보드
+7주차 1번 수업: 사이드바 필터, 집단 비교 및 드릴다운 영역 추가 대시보드
 """
 import sqlite3
 
@@ -192,7 +192,6 @@ with col_comp1:
         var_name="단계",
         value_name="세션수값"
     )
-    # 단계명 매핑 정리
     step_mapping = {
         "세션수": "1.방문",
         "조회세션": "2.식당조회",
@@ -202,7 +201,6 @@ with col_comp1:
     }
     funnel_melted["단계"] = funnel_melted["단계"].map(step_mapping)
     
-    # 첫 단계(1.방문 / 세션수) 대비 누적 전환율 계산
     first_vals = group_agg.set_index(group_col)["세션수"]
     funnel_melted["첫단계세션수"] = funnel_melted[group_col].map(first_vals)
     funnel_melted["누적전환율"] = (funnel_melted["세션수값"] / funnel_melted["첫단계세션수"] * 100).round(1)
@@ -219,7 +217,6 @@ with col_comp1:
 
 # 오른쪽: 단계 전환율 막대 차트 (직전 단계 대비 %)
 with col_comp2:
-    # 단계별 전환율 계산용 데이터프레임 생성
     rate_rows = []
     for _, row in group_agg.iterrows():
         g_name = row[group_col]
@@ -268,3 +265,78 @@ with col_comp2:
     )
     fig_comp2.update_layout(yaxis_title="단계 전환율 (%)", xaxis_title="")
     st.plotly_chart(fig_comp2, width="stretch")
+
+st.divider()
+
+# ------------------------------------------------------------
+# 5. 드릴다운: 언제부터, 무엇 때문일까 영역
+# ------------------------------------------------------------
+st.subheader("드릴다운: 언제부터, 무엇 때문일까")
+
+# f에 존재하는 해당 집단 값들만 추출
+available_groups = sorted(f[group_col].unique())
+
+col_dd1, col_dd2 = st.columns(2)
+with col_dd1:
+    selected_group = st.selectbox("자세히 볼 집단", options=available_groups)
+with col_dd2:
+    selected_step_name = st.selectbox(
+        "단계",
+        options=["방문 → 식당조회", "식당조회 → 장바구니", "장바구니 → 결제시작", "결제시작 → 주문"]
+    )
+
+# 단계 매핑 정의 (분자, 분모 컬럼 설정)
+step_column_mapping = {
+    "방문 → 식당조회": ("조회세션", "세션수"),
+    "식당조회 → 장바구니": ("장바구니세션", "조회세션"),
+    "장바구니 → 결제시작": ("결제시작세션", "장바구니세션"),
+    "결제시작 → 주문": ("주문세션", "결제시작세션")
+}
+num_col, den_col = step_column_mapping[selected_step_name]
+
+# 다른 축 설정 (플랫폼이면 유입경로, 유입경로면 플랫폼)
+other_col = "유입경로" if group_col == "플랫폼" else "플랫폼"
+
+# 차트 ① 데이터 준비: 선택한 집단만 필터링 후 다른 축별로 주별 집계
+df_drill = f[f[group_col] == selected_group].groupby(["주시작일", other_col])[[num_col, den_col]].sum().reset_index()
+
+# 직전 단계 세션이 0인 주는 0%로 채우지 않고 빈 값(NaN) 처리
+df_drill["전환율"] = df_drill.apply(
+    lambda row: round(row[num_col] / row[den_col] * 100, 1) if row[den_col] > 0 else None,
+    axis=1
+)
+
+fig_drill1 = px.line(
+    df_drill,
+    x="주시작일",
+    y="전환율",
+    color=other_col,
+    markers=True,
+    title=f"① {selected_group}의 주별 {selected_step_name} 전환율 — {other_col}별로 쪼개 보기"
+)
+fig_drill1.update_layout(yaxis_title="전환율 (%)", xaxis_title="")
+st.plotly_chart(fig_drill1, width="stretch")
+st.caption("모든 갈래가 같은 시점에 함께 움직였다면, 그 축은 원인이 아닙니다.")
+
+# 차트 ② 데이터 준비: 결제실패 건수 분석
+# 선택한 집단은 그대로 유지하고, 그 외 집단은 하나로 합침
+f_copy = f.copy()
+f_copy["대상집단"] = f_copy[group_col].apply(lambda x: selected_group if x == selected_group else "그 외")
+
+df_fail = f_copy.groupby(["주시작일", "대상집단"])["결제실패"].sum().reset_index()
+
+# 색상 지정: 선택한 집단은 진한 빨간색, 그 외는 회색
+color_map = {selected_group: "#d62728", "그 외": "#7f7f7f"}
+
+fig_drill2 = px.bar(
+    df_fail,
+    x="주시작일",
+    y="결제실패",
+    color="대상집단",
+    barmode="group",
+    color_discrete_map=color_map,
+    title=f"② 주별 결제 실패 건수 ({selected_group} vs 그 외)"
+)
+fig_drill2.update_layout(yaxis_title="결제 실패 건수", xaxis_title="")
+st.plotly_chart(fig_drill2, width="stretch")
+st.caption("문제가 생긴 시점과 함께 움직였다면 원인 후보입니다. 함께 움직였다고 원인이 확정되지는 않습니다.")
